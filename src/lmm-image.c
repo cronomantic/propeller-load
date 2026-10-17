@@ -19,7 +19,20 @@ uint8_t *BuildInternalImage(BoardConfig *config, ElfContext *c, uint32_t *pStart
     /* get the total size of the program */
     if (!GetProgramSize(c, &start, &imageSize, &cogImagesSize))
         return NullError("can't get program size");
-        
+
+    /* the Spin interpreter that starts the program puts its stack right
+       after the image (p1_UpdateHeader): two stack-marker longs, then the
+       three longs of the coginit that starts the kernel.  The linker only
+       checks that the image fits in hub RAM, and an image that reaches
+       its end (the kernel is loaded last) leaves that stack in ROM: the
+       program hangs before it starts. */
+#ifdef SUPPORT_P2
+    if (ELF_CHIP(&c->hdr) != ELF_CHIP_P2)
+#endif
+    if (imageSize + 6 * sizeof(uint32_t) > 32768)
+        return NullError("program does not fit in hub RAM: %u bytes, and starting it needs %u more after it",
+                         imageSize, (unsigned)(6 * sizeof(uint32_t)));
+
     /* check to see if cog images in eeprom are allowed */
     if (cogImagesSize > 0 && !pCogImagesSize)
         return NULL;
