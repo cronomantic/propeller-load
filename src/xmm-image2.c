@@ -97,6 +97,11 @@ uint8_t *BuildExternalImage2(BoardConfig *config, ElfContext *c, uint32_t *pLoad
                 if (program.paddr + program.memsz > endAddress)
                     endAddress = program.paddr + program.memsz;
             }
+            /* no contents: a .bss of its own (when an alignment gap keeps it
+               out of the .data segment); the image does not cover it, so it
+               is zeroed at start-up like the sections below the header */
+            else if (program.memsz > 0)
+                ++initTableSize;
         }
         
         /* section loads below the program header and needs to be initialized */
@@ -182,7 +187,15 @@ uint8_t *BuildExternalImage2(BoardConfig *config, ElfContext *c, uint32_t *pLoad
             free(table.entries);
             return NullError("can't load program table entry %d", i);
         }
-        if (i != ki && program.paddr < program_header.paddr) {
+        if (i != ki && program.paddr >= program_header.paddr
+                && program.filesz == 0 && program.memsz > 0) {
+            /* a .bss of its own above the header (see above) */
+            initSection->vaddr = program.paddr;
+            initSection->paddr = initSection->vaddr; // vaddr == paddr means to zero the section
+            initSection->size = program.memsz;
+            ++initSection;
+        }
+        else if (i != ki && program.paddr < program_header.paddr) {
             if (program.filesz > 0) {
                 if (!(buf = LoadProgramSegment(c, &program))) {
                     free(imagebuf);
