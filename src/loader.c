@@ -753,6 +753,53 @@ static int WriteSpinBinaryFile(BoardConfig *config, char *path, ElfContext *c)
     return TRUE;
 }
 
+/* CheckHubFits - an XMM or XMMC program keeps its hub data (all of it, in
+   XMMC), .bss and kernel extensions in hub RAM from address 0 up; the
+   loader puts the cache, its tags and the external memory driver's
+   mailboxes at the top (flash_loader2.spin, serial_helper2.spin), and the
+   stack grows down from the mailboxes.  Nothing checked that the two did
+   not meet: a program whose hub contents reached into the cache was
+   loaded and ran over its own data. */
+#define MIN_XMM_STACK   1024
+static int CheckHubFits(BoardConfig *config, ElfContext *c)
+{
+    uint32_t hubEnd = 0, top;
+    ElfProgramHdr program;
+    int i, ivalue;
+
+    if (ELF_VERSION(&c->hdr) == ELF_VERSION_UNKNOWN) {
+        /* old cache drivers (serial_helper.spin): the cache and its mailbox */
+        if (!GetNumericConfigField(config, "cache-size", &ivalue))
+            return TRUE;
+        top = 32768 - ivalue - 64;
+    }
+    else {
+        int index_width, offset_width;
+        if (!GetNumericConfigField(config, "cache-geometry", &ivalue))
+            return TRUE;
+        index_width = (ivalue >> 8) & 0xff;
+        offset_width = ivalue & 0xff;
+        /* cache lines, tags, 8 mailboxes of 2 longs and the end marker */
+        top = 32768 - (1u << (index_width + offset_width)) - (1u << index_width) * 4 - 8 * 2 * 4 - 4;
+    }
+
+    /* what goes to hub RAM (load addresses below $8000), the kernel excluded */
+    for (i = 0; i < c->hdr.phnum; ++i) {
+        if (!LoadProgramTableEntry(c, i, &program))
+            return Error("can't load program table entry %d", i);
+        if (program.paddr < 0x8000 && program.memsz > 0 && program.paddr + program.memsz > hubEnd)
+            hubEnd = program.paddr + program.memsz;
+    }
+
+    if (hubEnd > top)
+        return Error("program does not fit in hub RAM: its hub contents end at $%04x, "
+                     "but the cache and its mailboxes start at $%04x", hubEnd, top);
+    if (top - hubEnd < MIN_XMM_STACK)
+        printf("warning: only %u bytes of hub RAM left for the stack ($%04x-$%04x)\n",
+               top - hubEnd, hubEnd, top);
+    return TRUE;
+}
+
 static int LoadExternalImage(System *sys, BoardConfig *config, int flags, ElfContext *c)
 {
     uint8_t cacheDriverImage[COG_IMAGE_MAX], kernelImage[COG_IMAGE_MAX], *kernelbuf, *imagebuf, *helper_image;
@@ -762,7 +809,11 @@ static int LoadExternalImage(System *sys, BoardConfig *config, int flags, ElfCon
     int eepromFirst = FALSE;
     uint32_t loadAddress;
     int helper_size;
-    
+
+    /* the hub contents must leave room for the cache and the stack */
+    if (!CheckHubFits(config, c))
+        return FALSE;
+
     /* build the external image */
     if (ELF_VERSION(&c->hdr) == ELF_VERSION_UNKNOWN) {
         if (!(cacheDriver = GetConfigField(config,  "cache-driver")))
